@@ -16,6 +16,7 @@ import (
 	"github.com/example/goph-keeper/internal/client"
 	"github.com/example/goph-keeper/internal/domain"
 	"github.com/example/goph-keeper/internal/security"
+	"golang.org/x/term"
 )
 
 var (
@@ -109,19 +110,18 @@ func run(args []string) error {
 func authCommand(ctx context.Context, api remoteAPI, cfg *config, path, serverURL, command string, args []string) error {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	username := flags.String("username", "", "account username")
-	password := flags.String("password", "", "account password (or GOPHKEEPER_PASSWORD)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *password == "" {
-		*password = os.Getenv("GOPHKEEPER_PASSWORD")
+	if *username == "" {
+		return errors.New("username is required")
 	}
-	if *username == "" || *password == "" {
-		return errors.New("username and password are required")
+	password, err := readPassword("Password: ")
+	if err != nil {
+		return err
 	}
-	credentials := domain.Credentials{Username: *username, Password: *password}
+	credentials := domain.Credentials{Username: *username, Password: password}
 	var token string
-	var err error
 	if command == "register" {
 		token, err = api.Register(ctx, credentials)
 	} else {
@@ -263,11 +263,31 @@ func vaultKey(cfg *config) ([]byte, error) {
 	if cfg.Token == "" || cfg.Username == "" {
 		return nil, errors.New("authenticate first")
 	}
-	password := os.Getenv("GOPHKEEPER_PASSWORD")
-	if password == "" {
-		return nil, errors.New("set GOPHKEEPER_PASSWORD to encrypt or decrypt secrets")
+	password, err := readPassword("Vault password: ")
+	if err != nil {
+		return nil, err
 	}
 	return security.VaultKey(cfg.Username, password), nil
+}
+
+func readPassword(prompt string) (string, error) {
+	if password := os.Getenv("GOPHKEEPER_PASSWORD"); password != "" {
+		return password, nil
+	}
+	if _, err := fmt.Fprint(os.Stderr, prompt); err != nil {
+		return "", fmt.Errorf("write password prompt: %w", err)
+	}
+	password, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if _, newlineErr := fmt.Fprintln(os.Stderr); err == nil && newlineErr != nil {
+		err = newlineErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	if len(password) == 0 {
+		return "", errors.New("password is required")
+	}
+	return string(password), nil
 }
 
 func loadConfig(path string) (config, error) {

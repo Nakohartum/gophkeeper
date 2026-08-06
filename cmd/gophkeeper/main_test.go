@@ -22,10 +22,10 @@ func TestCLIWorkflow(t *testing.T) {
 	t.Setenv("GOPHKEEPER_CONFIG", configPath)
 	t.Setenv("GOPHKEEPER_PASSWORD", "password1")
 
-	if err = run([]string{"register", "-username", "alice", "-password", "password1"}); err != nil {
+	if err = run([]string{"register", "-username", "alice"}); err != nil {
 		t.Fatal(err)
 	}
-	if err = run([]string{"login", "-username", "alice", "-password", "password1"}); err != nil {
+	if err = run([]string{"login", "-username", "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	if err = run([]string{"add", "-type", "credential", "-name", "example", "-data", `{"login":"alice","password":"secret"}`, "-meta", "work"}); err != nil {
@@ -51,7 +51,7 @@ func TestCLIBinaryAndValidation(t *testing.T) {
 	t.Setenv("GOPHKEEPER_SERVER", service.URL)
 	t.Setenv("GOPHKEEPER_CONFIG", configPath)
 	t.Setenv("GOPHKEEPER_PASSWORD", "password1")
-	if err := run([]string{"register", "-username", "alice", "-password", "password1"}); err != nil {
+	if err := run([]string{"register", "-username", "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	file := filepath.Join(t.TempDir(), "blob.bin")
@@ -63,6 +63,7 @@ func TestCLIBinaryAndValidation(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"unknown"},
+		{"login", "-username", "alice", "-password", "password1"},
 		{"get"},
 		{"delete"},
 		{"add"},

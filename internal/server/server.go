@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/example/goph-keeper/internal/domain"
 	"github.com/example/goph-keeper/internal/security"
-	"github.com/example/goph-keeper/internal/store"
 )
 
 // Repository describes the persistent operations required by the HTTP API.
@@ -19,10 +19,10 @@ import (
 // Implementations must isolate items by userID and enforce optimistic locking
 // in Put.
 type Repository interface {
-	CreateUser(username, hash string) (string, error)
-	UserByName(username string) (string, string, error)
-	List(userID string) []domain.Item
-	Put(userID, itemID string, request domain.PutItem) (domain.Item, error)
+	CreateUser(ctx context.Context, username, hash string) (string, error)
+	UserByName(ctx context.Context, username string) (string, string, error)
+	List(ctx context.Context, userID string) ([]domain.Item, error)
+	Put(ctx context.Context, userID, itemID string, request domain.PutItem) (domain.Item, error)
 }
 
 // Server is an HTTP handler for the GophKeeper API.
@@ -67,9 +67,14 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not secure password")
 		return
 	}
-	id, err := s.repository.CreateUser(credentials.Username, hash)
+	id, err := s.repository.CreateUser(r.Context(), credentials.Username, hash)
+	if errors.Is(err, domain.ErrUsernameTaken) {
+		writeError(w, http.StatusConflict, domain.ErrUsernameTaken.Error())
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		s.log.Error("create user", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not create user")
 		return
 	}
 	s.respondToken(w, id, http.StatusCreated)
@@ -80,7 +85,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &credentials) {
 		return
 	}
-	id, hash, err := s.repository.UserByName(credentials.Username)
+	id, hash, err := s.repository.UserByName(r.Context(), credentials.Username)
 	if err != nil || !security.CheckPassword(credentials.Password, hash) {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
@@ -109,13 +114,18 @@ func (s *Server) authorize(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "invalid or expired token")
 			return
 		}
-		r.Header.Set("X-GophKeeper-User", id)
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userIDKey{}, id)))
 	})
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.repository.List(r.Header.Get("X-GophKeeper-User")))
+	items, err := s.repository.List(r.Context(), userIDFromContext(r.Context()))
+	if err != nil {
+		s.log.Error("list items", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not list items")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) put(w http.ResponseWriter, r *http.Request) {
@@ -132,8 +142,8 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ciphertext is required")
 		return
 	}
-	item, err := s.repository.Put(r.Header.Get("X-GophKeeper-User"), id, request)
-	if errors.Is(err, store.ErrConflict) {
+	item, err := s.repository.Put(r.Context(), userIDFromContext(r.Context()), id, request)
+	if errors.Is(err, domain.ErrConflict) {
 		writeJSON(w, http.StatusConflict, item)
 		return
 	}
@@ -144,8 +154,15 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+type userIDKey struct{}
+
+func userIDFromContext(ctx context.Context) string {
+	userID, _ := ctx.Value(userIDKey{}).(string)
+	return userID
+}
+
 func decode(w http.ResponseWriter, r *http.Request, target any) bool {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

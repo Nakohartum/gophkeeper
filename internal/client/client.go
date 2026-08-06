@@ -102,7 +102,7 @@ func (a *API) request(ctx context.Context, method, path, token string, input, ou
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var apiError domain.ErrorResponse
 		if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&apiError) == nil && apiError.Error != "" {

@@ -2,9 +2,13 @@
 package store
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,12 +17,6 @@ import (
 
 	"github.com/example/goph-keeper/internal/domain"
 )
-
-// ErrConflict indicates an optimistic-lock version conflict.
-var ErrConflict = errors.New("item version conflict")
-
-// ErrNotFound indicates that an entity does not exist.
-var ErrNotFound = errors.New("not found")
 
 type user struct {
 	ID       string `json:"id"`
@@ -33,7 +31,7 @@ type state struct {
 
 // FileStore is a concurrency-safe JSON repository intended for a single server process.
 type FileStore struct {
-	mu    sync.RWMutex
+	mu    sync.Mutex
 	path  string
 	state state
 }
@@ -61,14 +59,17 @@ func Open(path string) (*FileStore, error) {
 }
 
 // CreateUser persists a new unique user and returns its identifier.
-func (s *FileStore) CreateUser(username, hash string) (string, error) {
+func (s *FileStore) CreateUser(_ context.Context, username, hash string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := strings.ToLower(strings.TrimSpace(username))
 	if _, exists := s.state.Users[key]; exists {
-		return "", errors.New("username already exists")
+		return "", domain.ErrUsernameTaken
 	}
-	id := fmt.Sprintf("u-%d", time.Now().UnixNano())
+	id, err := randomID()
+	if err != nil {
+		return "", fmt.Errorf("generate user id: %w", err)
+	}
 	s.state.Users[key] = user{ID: id, Username: username, Hash: hash}
 	s.state.Items[id] = map[string]domain.Item{}
 	if err := s.saveLocked(); err != nil {
@@ -80,39 +81,39 @@ func (s *FileStore) CreateUser(username, hash string) (string, error) {
 }
 
 // UserByName returns an identifier and password verifier for username.
-func (s *FileStore) UserByName(username string) (string, string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *FileStore) UserByName(_ context.Context, username string) (string, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	u, ok := s.state.Users[strings.ToLower(strings.TrimSpace(username))]
 	if !ok {
-		return "", "", ErrNotFound
+		return "", "", domain.ErrNotFound
 	}
 	return u.ID, u.Hash, nil
 }
 
 // List returns all encrypted items, including deletion tombstones, owned by userID.
-func (s *FileStore) List(userID string) []domain.Item {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *FileStore) List(_ context.Context, userID string) ([]domain.Item, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	items := s.state.Items[userID]
 	result := make([]domain.Item, 0, len(items))
 	for _, item := range items {
 		result = append(result, item)
 	}
-	return result
+	return result, nil
 }
 
 // Put atomically creates or replaces an item when its expected version matches.
-func (s *FileStore) Put(userID, itemID string, request domain.PutItem) (domain.Item, error) {
+func (s *FileStore) Put(_ context.Context, userID, itemID string, request domain.PutItem) (domain.Item, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	items, ok := s.state.Items[userID]
 	if !ok {
-		return domain.Item{}, ErrNotFound
+		return domain.Item{}, domain.ErrNotFound
 	}
 	current, exists := items[itemID]
 	if (!exists && request.Version != 0) || (exists && request.Version != current.Version) {
-		return current, ErrConflict
+		return current, domain.ErrConflict
 	}
 	next := domain.Item{
 		ID: itemID, Ciphertext: request.Ciphertext, Deleted: request.Deleted,
@@ -128,6 +129,14 @@ func (s *FileStore) Put(userID, itemID string, request domain.PutItem) (domain.I
 		return domain.Item{}, err
 	}
 	return next, nil
+}
+
+func randomID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
 }
 
 func (s *FileStore) saveLocked() error {
